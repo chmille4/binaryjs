@@ -772,8 +772,8 @@ var util = {
     }
     return dest;
   },
-  pack: BinaryPack.pack,
-  unpack: BinaryPack.unpack,
+  pack: exports.BinaryPack.pack,
+  unpack: exports.BinaryPack.unpack,
   setZeroTimeout: (function(global) {
     var timeouts = [];
     var messageName = 'zero-timeout-message';
@@ -1294,6 +1294,13 @@ BinaryStream.prototype.end = function() {
   this._write(5, null, this.id);
 };
 
+BinaryStream.prototype.error = function(error) {
+  this._ended = true;
+  this.readable = false;
+  this._write(7, error, this.id);
+};
+
+
 BinaryStream.prototype.destroy = BinaryStream.prototype.destroySoon = function() {
   this._onClose();
   this._write(6, null, this.id);
@@ -1470,6 +1477,16 @@ function BinaryClient(socket, options) {
             binaryStream._onClose();
           } else {
             self.emit('error', new Error('Received `close` message for unknown stream: ' + streamId));
+          }
+          break;
+        case 7:
+          var error = data[1];
+          var streamId = data[2];
+          var binaryStream = self.streams[streamId];
+          if(binaryStream) {
+            binaryStream._onError(error);
+          } else {
+            self.emit('error', new Error('Received `error` message for unknown stream: ' + streamId));
           }
           break;
         default:
