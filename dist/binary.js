@@ -17,24 +17,13 @@ binaryFeatures.useArrayBufferView = !binaryFeatures.useBlobBuilder && (function(
     return true;
   }
 })();
-binaryFeatures.supportsBinaryWebsockets = (function(){
-  try {
-    var wstest = new WebSocket('ws://null');
-    wstest.onerror = function(){};
-    if (typeof(wstest.binaryType) !== "undefined") {
-      return true;
-    } else {
-      return false;
-    }
-    wstest.close();
-    wstest = null;
-  } catch (e) {
-    return false;
-  }
-})();
 
-exports.binaryFeatures = binaryFeatures;
-exports.BlobBuilder = window.WebKitBlobBuilder || window.MozBlobBuilder || window.MSBlobBuilder || window.BlobBuilder;
+module.exports.binaryFeatures = binaryFeatures;
+var BlobBuilder = module.exports.BlobBuilder;
+if (typeof window != 'undefined') {
+  BlobBuilder = module.exports.BlobBuilder = window.WebKitBlobBuilder ||
+    window.MozBlobBuilder || window.MSBlobBuilder || window.BlobBuilder;
+}
 
 function BufferBuilder(){
   this._pieces = [];
@@ -73,7 +62,12 @@ BufferBuilder.prototype.getBuffer = function() {
     return new Blob(this._parts);
   }
 };
-exports.BinaryPack = {
+
+module.exports.BufferBuilder = BufferBuilder;
+var BufferBuilder = require('./bufferbuilder').BufferBuilder;
+var binaryFeatures = require('./bufferbuilder').binaryFeatures;
+
+var BinaryPack = {
   unpack: function(data){
     var unpacker = new Unpacker(data);
     return unpacker.unpack();
@@ -86,6 +80,8 @@ exports.BinaryPack = {
   }
 };
 
+module.exports = BinaryPack;
+
 function Unpacker (data){
   // Data is ArrayBuffer
   this.index = 0;
@@ -93,7 +89,6 @@ function Unpacker (data){
   this.dataView = new Uint8Array(this.dataBuffer);
   this.length = this.dataBuffer.byteLength;
 }
-
 
 Unpacker.prototype.unpack = function(){
   var type = this.unpack_uint8();
@@ -400,7 +395,6 @@ Packer.prototype.pack_bin = function(blob){
     this.pack_uint32(length);
   } else{
     throw new Error('Invalid length');
-    return;
   }
   this.bufferBuilder.append(blob);
 }
@@ -418,7 +412,6 @@ Packer.prototype.pack_string = function(str){
     this.pack_uint32(length);
   } else{
     throw new Error('Invalid length');
-    return;
   }
   this.bufferBuilder.append(str);
 }
@@ -629,7 +622,7 @@ EventEmitter.prototype.addListener = function(type, listener, scope, once) {
     // Adding the second element, need to change to array.
     this._events[type] = [this._events[type], listener];
   }
-  return this;
+  
 };
 
 EventEmitter.prototype.on = EventEmitter.prototype.addListener;
@@ -772,8 +765,8 @@ var util = {
     }
     return dest;
   },
-  pack: exports.BinaryPack.pack,
-  unpack: exports.BinaryPack.unpack,
+  pack: BinaryPack.pack,
+  unpack: BinaryPack.unpack,
   setZeroTimeout: (function(global) {
     var timeouts = [];
     var messageName = 'zero-timeout-message';
@@ -1205,6 +1198,16 @@ function onFull(buffer, extraSize, callback){
 */
 exports.BlobReadStream = BlobReadStream;
 
+function guid() {
+  function s4() {
+    return Math.floor((1 + Math.random()) * 0x10000)
+      .toString(16)
+      .substring(1);
+  }
+  return s4() + s4() + '-' + s4() + '-' + s4() + '-' +
+    s4() + '-' + s4() + s4() + s4();
+}
+
 function BinaryStream(socket, id, create, meta) {
   if (!(this instanceof BinaryStream)) return new BinaryStream(options);
   
@@ -1214,6 +1217,7 @@ function BinaryStream(socket, id, create, meta) {
 
   
   this.id = id;
+  this.guid = guid();
   this._socket = socket;
     
   this.writable = true;
@@ -1250,12 +1254,16 @@ BinaryStream.prototype._onClose = function() {
 };
 
 BinaryStream.prototype._onError = function(error){
-  this.readable = false;
-  this.writable = false;
-  this.emit('error', error);
+  this.emit('err', error);
 };
 
-// Write stream
+BinaryStream.prototype._onMessage = function(event, msg){
+  this.emit(event, msg);
+};
+
+BinaryStream.prototype._onCreateClientConnection = function(connection){
+  this.emit('createClientConnection', connection);
+};
 
 BinaryStream.prototype._onPause = function() {
   // Emit pause event
@@ -1283,8 +1291,7 @@ BinaryStream.prototype.write = function(data) {
     var out = this._write(2, data, this.id);
     return !this.paused && out;
   } else {
-    this.emit('error', new Error('Stream is not writable'));
-    return false;
+    throw new Error('Stream is not writable');
   }
 };
 
@@ -1295,11 +1302,17 @@ BinaryStream.prototype.end = function() {
 };
 
 BinaryStream.prototype.error = function(error) {
-  this._ended = true;
-  this.readable = false;
   this._write(7, error, this.id);
 };
 
+
+BinaryStream.prototype.createClientConnection = function(connection) {
+  this._write(8, connection, this.id);
+};
+
+BinaryStream.prototype.message = function(event, msg) {
+  this._write(9, [event, msg], this.id);
+};
 
 BinaryStream.prototype.destroy = BinaryStream.prototype.destroySoon = function() {
   this._onClose();
@@ -1334,7 +1347,8 @@ BinaryStream.prototype.resume = function() {
 };
 
 
-function BinaryClient(socket, options) {
+function BinaryClient(socket, options) {  
+
   if (!(this instanceof BinaryClient)) return new BinaryClient(socket, options);
   
   EventEmitter.call(this);
@@ -1481,14 +1495,35 @@ function BinaryClient(socket, options) {
           break;
         case 7:
           var error = data[1];
-          var streamId = data[2];
-          var binaryStream = self.streams[streamId];
+          var streamId = data[2];          
+          var binaryStream = self.streams[streamId];          
           if(binaryStream) {
             binaryStream._onError(error);
           } else {
             self.emit('error', new Error('Received `error` message for unknown stream: ' + streamId));
           }
           break;
+        case 8:
+          var connection = data[1];
+          var streamId = data[2];          
+          var binaryStream = self.streams[streamId];          
+          if(binaryStream) {
+            binaryStream._onCreateClientConnection(connection);
+          } else {
+            self.emit('error', new Error('Received `error` message for unknown stream: ' + streamId));
+          }
+          break;
+        case 9:
+          var event = data[1][0];
+          var msg = data[1][1];          
+          var streamId = data[2];          
+          var binaryStream = self.streams[streamId];          
+          if(binaryStream) {
+            binaryStream._onMessage(event, msg);
+          } else {
+            self.emit('error', new Error('Received `error` message for unknown stream: ' + streamId));
+          }
+          break;          
         default:
           self.emit('error', new Error('Unrecognized message type received: ' + data[0]));
       }
